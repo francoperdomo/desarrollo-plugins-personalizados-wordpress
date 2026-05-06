@@ -78,6 +78,11 @@ function dvm_hpos_aplicar_descuento_por_volumen($cart) {
     if (is_admin() && !defined('DOING_AJAX')) return;
     if ($cart->is_empty()) return;
 
+    // Verificar si algún cupón activo bloquea el descuento por volumen
+    if (dvm_hpos_check_coupon_blocks_discount($cart)) {
+        return;
+    }
+
     // Usar caché de carrito para optimización
     $cache_key = 'dvm_total_docenas_' . md5(wp_json_encode($cart->get_cart_contents()));
     $total_docenas = wp_cache_get($cache_key, 'dvm_descuentos');
@@ -272,11 +277,12 @@ function dvm_hpos_get_branding_defaults() {
         'color_success'   => '#27ae60',
         'color_warning'   => '#f39c12',
         'color_accent'    => '#e74c3c',
-        'dark_primary'    => '#ecf0f1',
-        'dark_secondary'  => '#5dade2',
-        'dark_success'    => '#2ecc71',
-        'dark_warning'    => '#f39c12',
-        'dark_accent'     => '#e74c3c',
+        'dark_primary'         => '#ecf0f1',
+        'dark_secondary'       => '#5dade2',
+        'dark_success'         => '#2ecc71',
+        'dark_warning'         => '#f39c12',
+        'dark_accent'          => '#e74c3c',
+        'coupon_active_message' => 'Tenés un cupón activo. El descuento por cantidad no aplica en este pedido.',
     ];
 }
 
@@ -292,7 +298,7 @@ function dvm_hpos_unit_label() {
 function dvm_hpos_save_branding($data) {
     $defaults     = dvm_hpos_get_branding_defaults();
     $clean        = [];
-    $text_fields  = ['unit_label', 'discount_name', 'shortcode_title', 'shortcode_desc'];
+    $text_fields  = ['unit_label', 'discount_name', 'shortcode_title', 'shortcode_desc', 'coupon_active_message'];
     $color_fields = ['color_primary', 'color_secondary', 'color_success', 'color_warning', 'color_accent',
                      'dark_primary', 'dark_secondary', 'dark_success', 'dark_warning', 'dark_accent'];
 
@@ -332,6 +338,78 @@ function dvm_hpos_get_custom_css_vars() {
 }
 
 /**
+ * Reglas de compatibilidad con cupones
+ */
+function dvm_hpos_get_coupon_rules_defaults() {
+    return [
+        'special_coupons'        => [],
+        'default_behavior'       => 'combine',
+        'always_combine_coupons' => [],
+    ];
+}
+
+function dvm_hpos_get_coupon_rules() {
+    return wp_parse_args(get_option('dvm_hpos_coupon_rules', []), dvm_hpos_get_coupon_rules_defaults());
+}
+
+function dvm_hpos_save_coupon_rules($data) {
+    $clean = dvm_hpos_get_coupon_rules_defaults();
+
+    foreach (['special_coupons', 'always_combine_coupons'] as $field) {
+        $clean[$field] = [];
+        $raw = !empty($data[$field]) ? $data[$field] : '';
+        if (is_string($raw)) {
+            $raw = explode(',', $raw);
+        }
+        if (is_array($raw)) {
+            foreach ($raw as $code) {
+                $code = strtoupper(sanitize_text_field(trim($code)));
+                if ($code !== '') {
+                    $clean[$field][] = $code;
+                }
+            }
+            $clean[$field] = array_values(array_unique($clean[$field]));
+        }
+    }
+
+    $clean['default_behavior'] = in_array($data['default_behavior'] ?? '', ['combine', 'no_combine'])
+        ? sanitize_text_field($data['default_behavior'])
+        : 'combine';
+
+    return update_option('dvm_hpos_coupon_rules', $clean);
+}
+
+/**
+ * Devuelve true si algún cupón activo en el carrito debe bloquear el descuento por volumen.
+ */
+function dvm_hpos_check_coupon_blocks_discount($cart) {
+    $applied = $cart->get_applied_coupons();
+    if (empty($applied)) {
+        return false;
+    }
+
+    $rules           = dvm_hpos_get_coupon_rules();
+    $applied_upper   = array_map('strtoupper', $applied);
+    $special_upper   = array_map('strtoupper', $rules['special_coupons']);
+    $always_upper    = array_map('strtoupper', $rules['always_combine_coupons']);
+    $default_combine = $rules['default_behavior'] === 'combine';
+
+    foreach ($applied_upper as $code) {
+        if ($default_combine) {
+            if (in_array($code, $special_upper, true)) {
+                return true;
+            }
+        } else {
+            if (!in_array($code, $always_upper, true)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/**
  * Configuración en el admin
  */
 add_action('admin_init', 'dvm_hpos_register_settings');
@@ -367,9 +445,10 @@ function dvm_hpos_admin_page() {
         dvm_hpos_process_admin_actions();
     }
 
-    $levels    = dvm_hpos_get_discount_levels();
-    $is_active = get_option('dvm_hpos_active', true);
-    $branding  = dvm_hpos_get_branding();
+    $levels       = dvm_hpos_get_discount_levels();
+    $is_active    = get_option('dvm_hpos_active', true);
+    $branding     = dvm_hpos_get_branding();
+    $coupon_rules = dvm_hpos_get_coupon_rules();
     ?>
     <div class="wrap">
         <h1><?php printf(esc_html__('Gestión de Niveles — %s', 'descuentos-volumen-medias'), esc_html($branding['discount_name'])); ?></h1>
@@ -514,6 +593,96 @@ function dvm_hpos_admin_page() {
 
         <hr style="margin: 40px 0;">
 
+        <!-- Sección de Cupones -->
+        <div class="dvm-coupon-section" id="dvm-coupon-section">
+            <div class="dvm-coupon-header">
+                <span class="dashicons dashicons-tickets-alt dvm-coupon-icon"></span>
+                <div>
+                    <h2 style="margin:0 0 4px;"><?php esc_html_e('Cupones y descuentos por cantidad', 'descuentos-volumen-medias'); ?></h2>
+                    <p class="dvm-coupon-subtitle"><?php esc_html_e('Controlá cómo interactúan los cupones con el descuento por cantidad.', 'descuentos-volumen-medias'); ?></p>
+                </div>
+            </div>
+
+            <form method="post" id="dvm-coupon-form">
+                <?php wp_nonce_field('dvm_admin_action', 'dvm_nonce'); ?>
+                <input type="hidden" name="dvm_action" value="save_coupon_rules">
+
+                <!-- Cupones de promociones especiales -->
+                <div class="dvm-cfield-group">
+                    <div class="dvm-cfield-label">
+                        <span class="dvm-clabel-icon">🎫</span>
+                        <strong><?php esc_html_e('Cupones de promociones especiales', 'descuentos-volumen-medias'); ?></strong>
+                        <span class="dvm-cbadge dvm-cbadge-red"><?php esc_html_e('No combinan con el descuento por cantidad', 'descuentos-volumen-medias'); ?></span>
+                    </div>
+                    <p class="dvm-cfield-desc"><?php esc_html_e('Escribí los cupones de tus promos especiales: Día de la Madre, Navidad, liquidaciones, etc. Cuando un cliente use alguno de estos cupones, el descuento por cantidad se desactiva automáticamente.', 'descuentos-volumen-medias'); ?></p>
+                    <div class="dvm-tag-field" id="special-tag-field" data-target="special-coupons-value" data-color="red">
+                        <div class="dvm-tags-wrap" id="special-tags-wrap">
+                            <?php foreach ($coupon_rules['special_coupons'] as $code): ?>
+                            <span class="dvm-ctag dvm-ctag-red">
+                                <?php echo esc_html($code); ?>
+                                <button type="button" class="dvm-ctag-remove" data-value="<?php echo esc_attr($code); ?>" aria-label="Quitar">&times;</button>
+                            </span>
+                            <?php endforeach; ?>
+                            <input type="text" class="dvm-ctag-input" id="special-coupon-input" placeholder="<?php esc_attr_e('Ej: DIADLAMADRE25 — presioná Enter para agregar', 'descuentos-volumen-medias'); ?>" autocomplete="off">
+                        </div>
+                    </div>
+                    <input type="hidden" name="special_coupons" id="special-coupons-value" value="<?php echo esc_attr(implode(',', $coupon_rules['special_coupons'])); ?>">
+                </div>
+
+                <!-- Comportamiento para el resto de los cupones -->
+                <div class="dvm-cfield-group">
+                    <div class="dvm-cfield-label">
+                        <span class="dvm-clabel-icon">⚙️</span>
+                        <strong><?php esc_html_e('¿Qué pasa con el resto de los cupones?', 'descuentos-volumen-medias'); ?></strong>
+                    </div>
+                    <div class="dvm-radio-cards" id="dvm-radio-cards">
+                        <label class="dvm-radio-card <?php echo $coupon_rules['default_behavior'] === 'combine' ? 'dvm-radio-card--active' : ''; ?>">
+                            <input type="radio" name="default_behavior" value="combine" <?php checked($coupon_rules['default_behavior'], 'combine'); ?>>
+                            <div class="dvm-radio-body">
+                                <div class="dvm-radio-title"><?php esc_html_e('Se combinan con el descuento por cantidad', 'descuentos-volumen-medias'); ?> <span class="dvm-crecommended"><?php esc_html_e('Recomendado', 'descuentos-volumen-medias'); ?></span></div>
+                                <div class="dvm-radio-desc"><?php esc_html_e('El cliente recibe el cupón Y el descuento por cantidad. Solo los cupones de la lista de arriba desactivan el descuento.', 'descuentos-volumen-medias'); ?></div>
+                            </div>
+                        </label>
+                        <label class="dvm-radio-card <?php echo $coupon_rules['default_behavior'] === 'no_combine' ? 'dvm-radio-card--active' : ''; ?>">
+                            <input type="radio" name="default_behavior" value="no_combine" <?php checked($coupon_rules['default_behavior'], 'no_combine'); ?>>
+                            <div class="dvm-radio-body">
+                                <div class="dvm-radio-title"><?php esc_html_e('También desactivan el descuento por cantidad', 'descuentos-volumen-medias'); ?></div>
+                                <div class="dvm-radio-desc"><?php esc_html_e('Cualquier cupón desactiva el descuento por cantidad, salvo los que agregues en la lista de excepción de abajo.', 'descuentos-volumen-medias'); ?></div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Cupones que SIEMPRE combinan (solo visible en modo no_combine) -->
+                <div class="dvm-cfield-group dvm-cfield-conditional" id="always-combine-group" style="<?php echo $coupon_rules['default_behavior'] === 'no_combine' ? '' : 'display:none;'; ?>">
+                    <div class="dvm-cfield-label">
+                        <span class="dvm-clabel-icon">✅</span>
+                        <strong><?php esc_html_e('Cupones que siempre se combinan con el descuento por cantidad', 'descuentos-volumen-medias'); ?></strong>
+                        <span class="dvm-cbadge dvm-cbadge-green"><?php esc_html_e('Siempre combinan', 'descuentos-volumen-medias'); ?></span>
+                    </div>
+                    <p class="dvm-cfield-desc"><?php esc_html_e('Estos cupones se pueden usar junto con el descuento por cantidad aunque el comportamiento general sea "no combinar". Ideal para cupones de clientes VIP, mayoristas o programas de fidelidad.', 'descuentos-volumen-medias'); ?></p>
+                    <div class="dvm-tag-field" id="always-tag-field" data-target="always-coupons-value" data-color="green">
+                        <div class="dvm-tags-wrap" id="always-tags-wrap">
+                            <?php foreach ($coupon_rules['always_combine_coupons'] as $code): ?>
+                            <span class="dvm-ctag dvm-ctag-green">
+                                <?php echo esc_html($code); ?>
+                                <button type="button" class="dvm-ctag-remove" data-value="<?php echo esc_attr($code); ?>" aria-label="Quitar">&times;</button>
+                            </span>
+                            <?php endforeach; ?>
+                            <input type="text" class="dvm-ctag-input" id="always-coupon-input" placeholder="<?php esc_attr_e('Ej: FIDELIDAD10 — presioná Enter para agregar', 'descuentos-volumen-medias'); ?>" autocomplete="off">
+                        </div>
+                    </div>
+                    <input type="hidden" name="always_combine_coupons" id="always-coupons-value" value="<?php echo esc_attr(implode(',', $coupon_rules['always_combine_coupons'])); ?>">
+                </div>
+
+                <div class="dvm-coupon-actions">
+                    <?php submit_button(__('Guardar configuración de cupones', 'descuentos-volumen-medias'), 'primary', 'submit_coupon_rules', false); ?>
+                </div>
+            </form>
+        </div>
+
+        <hr style="margin: 40px 0;">
+
         <!-- Sección de personalización -->
         <div class="dvm-branding-section" style="max-width: 900px;">
             <h2><?php esc_html_e('Personalización', 'descuentos-volumen-medias'); ?></h2>
@@ -566,6 +735,17 @@ function dvm_hpos_admin_page() {
                             <input type="text" id="shortcode_desc" name="shortcode_desc"
                                    value="<?php echo esc_attr($branding['shortcode_desc']); ?>"
                                    class="regular-text" placeholder="Compra más y ahorra más.">
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="coupon_active_message"><?php esc_html_e('Mensaje con cupón activo', 'descuentos-volumen-medias'); ?></label>
+                        </th>
+                        <td>
+                            <input type="text" id="coupon_active_message" name="coupon_active_message"
+                                   value="<?php echo esc_attr($branding['coupon_active_message']); ?>"
+                                   class="large-text">
+                            <p class="description"><?php esc_html_e('Texto que ve el cliente en el indicador de progreso cuando hay un cupón que desactiva el descuento por cantidad.', 'descuentos-volumen-medias'); ?></p>
                         </td>
                     </tr>
                 </table>
@@ -642,6 +822,191 @@ function dvm_hpos_admin_page() {
             color: #1d2327;
         }
         .wp-picker-container { display: block; }
+
+        /* ── Sección de cupones ──────────────────────────────── */
+        .dvm-coupon-section {
+            background: #fff;
+            border: 1px solid #c3c4c7;
+            border-radius: 6px;
+            padding: 24px 28px;
+            max-width: 900px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.06);
+        }
+        .dvm-coupon-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 24px;
+            padding-bottom: 18px;
+            border-bottom: 1px solid #f0f0f1;
+        }
+        .dvm-coupon-icon {
+            font-size: 26px !important;
+            color: #7c3aed;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+        .dvm-coupon-subtitle {
+            margin: 2px 0 0;
+            color: #787c82;
+            font-size: 13px;
+        }
+        /* Grupos de campo */
+        .dvm-cfield-group {
+            margin-bottom: 26px;
+        }
+        .dvm-cfield-label {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 7px;
+            margin-bottom: 7px;
+            font-size: 14px;
+            color: #1d2327;
+        }
+        .dvm-clabel-icon { font-size: 15px; }
+        .dvm-cfield-desc {
+            margin: 0 0 10px;
+            color: #787c82;
+            font-size: 12.5px;
+            line-height: 1.55;
+        }
+        /* Badges */
+        .dvm-cbadge {
+            font-size: 10.5px;
+            font-weight: 600;
+            padding: 2px 9px;
+            border-radius: 20px;
+            text-transform: uppercase;
+            letter-spacing: .3px;
+            white-space: nowrap;
+        }
+        .dvm-cbadge-red   { background:#fef2f2; color:#dc2626; border:1px solid #fecaca; }
+        .dvm-cbadge-green { background:#f0fdf4; color:#16a34a; border:1px solid #bbf7d0; }
+        /* Tag field */
+        .dvm-tag-field {
+            border: 1.5px solid #dcdcde;
+            border-radius: 5px;
+            padding: 7px 9px;
+            background: #fafafa;
+            min-height: 42px;
+            cursor: text;
+            transition: border-color .18s, box-shadow .18s;
+        }
+        .dvm-tag-field:focus-within {
+            border-color: #2271b1;
+            box-shadow: 0 0 0 2.5px rgba(34,113,177,.15);
+            background: #fff;
+        }
+        .dvm-tags-wrap {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+        .dvm-ctag {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11.5px;
+            font-weight: 700;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            letter-spacing: .6px;
+            animation: dvmTagPop .14s cubic-bezier(.34,1.56,.64,1) both;
+        }
+        @keyframes dvmTagPop {
+            from { transform: scale(.75); opacity:0; }
+            to   { transform: scale(1);   opacity:1; }
+        }
+        .dvm-ctag-red   { background:#fef2f2; color:#b91c1c; border:1px solid #fca5a5; }
+        .dvm-ctag-green { background:#f0fdf4; color:#15803d; border:1px solid #86efac; }
+        .dvm-ctag-remove {
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: inherit;
+            font-size: 16px;
+            padding: 0;
+            line-height: 1;
+            opacity: .55;
+            transition: opacity .15s;
+            display: flex;
+            align-items: center;
+        }
+        .dvm-ctag-remove:hover { opacity: 1; }
+        .dvm-ctag-input {
+            border: none;
+            outline: none;
+            background: transparent;
+            font-size: 13px;
+            min-width: 200px;
+            flex: 1;
+            padding: 3px 2px;
+            color: #1d2327;
+        }
+        .dvm-ctag-input::placeholder { color: #a7aaad; }
+        /* Radio cards */
+        .dvm-radio-cards {
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+        .dvm-radio-card {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 13px 16px;
+            border: 1.5px solid #e2e4e7;
+            border-radius: 7px;
+            cursor: pointer;
+            transition: border-color .18s, background .18s, box-shadow .18s;
+            background: #fff;
+        }
+        .dvm-radio-card:hover {
+            border-color: #2271b1;
+            background: #f8fbff;
+        }
+        .dvm-radio-card--active {
+            border-color: #2271b1;
+            background: #f0f7ff;
+            box-shadow: 0 0 0 2px rgba(34,113,177,.1);
+        }
+        .dvm-radio-card input[type=radio] {
+            margin-top: 2px;
+            flex-shrink: 0;
+            accent-color: #2271b1;
+        }
+        .dvm-radio-body { display:flex; flex-direction:column; gap:3px; }
+        .dvm-radio-title { font-size:13px; font-weight:600; color:#1d2327; }
+        .dvm-radio-desc  { font-size:12px; color:#787c82; line-height:1.45; }
+        .dvm-crecommended {
+            display: inline-block;
+            background: #ecfdf5;
+            color: #059669;
+            font-size: 10px;
+            font-weight: 700;
+            padding: 1px 7px;
+            border-radius: 20px;
+            text-transform: uppercase;
+            letter-spacing: .3px;
+            margin-left: 5px;
+            vertical-align: middle;
+        }
+        /* Grupo condicional */
+        .dvm-cfield-conditional {
+            padding: 18px 20px;
+            background: #f9fafb;
+            border: 1px dashed #c8ccd0;
+            border-radius: 6px;
+        }
+        /* Acciones */
+        .dvm-coupon-actions {
+            padding-top: 10px;
+            margin-top: 6px;
+            border-top: 1px solid #f0f0f1;
+        }
     </style>
     <?php
 }
@@ -722,8 +1087,23 @@ function dvm_hpos_process_admin_actions() {
             wp_redirect($redirect_url);
             exit;
 
+        case 'save_coupon_rules':
+            $data = [
+                'special_coupons'        => isset($_POST['special_coupons']) ? sanitize_text_field($_POST['special_coupons']) : '',
+                'always_combine_coupons' => isset($_POST['always_combine_coupons']) ? sanitize_text_field($_POST['always_combine_coupons']) : '',
+                'default_behavior'       => isset($_POST['default_behavior']) ? sanitize_text_field($_POST['default_behavior']) : 'combine',
+            ];
+
+            dvm_hpos_save_coupon_rules($data);
+            dvm_hpos_clear_discount_cache();
+
+            $redirect_url = add_query_arg('message', urlencode(__('Configuración de cupones guardada correctamente.', 'descuentos-volumen-medias')),
+                                        remove_query_arg(['message', 'error']));
+            wp_redirect($redirect_url . '#dvm-coupon-section');
+            exit;
+
         case 'save_branding':
-            $fields = ['unit_label', 'discount_name', 'shortcode_title', 'shortcode_desc',
+            $fields = ['unit_label', 'discount_name', 'shortcode_title', 'shortcode_desc', 'coupon_active_message',
                        'color_primary', 'color_secondary', 'color_success', 'color_warning', 'color_accent',
                        'dark_primary', 'dark_secondary', 'dark_success', 'dark_warning', 'dark_accent'];
 
@@ -816,6 +1196,73 @@ function dvm_hpos_admin_scripts($hook) {
             setTimeout(function() {
                 $(".notice.is-dismissible").fadeOut();
             }, 5000);
+
+            // ── Tag input para cupones ──────────────────────────────────────
+            function dvmInitTagField(fieldId, inputId, hiddenId, colorClass) {
+                var $field  = $("#" + fieldId);
+                var $input  = $("#" + inputId);
+                var $hidden = $("#" + hiddenId);
+
+                function getCodes() {
+                    var val = $hidden.val().trim();
+                    return val ? val.split(",").map(function(c){ return c.trim().toUpperCase(); }).filter(Boolean) : [];
+                }
+
+                function saveAndRender(codes) {
+                    $hidden.val(codes.join(","));
+                    $field.find(".dvm-ctag").remove();
+                    codes.forEach(function(code) {
+                        var $tag = $("<span>").addClass("dvm-ctag dvm-ctag-" + colorClass).text(code);
+                        var $btn = $("<button>").attr({type:"button","aria-label":"Quitar"}).addClass("dvm-ctag-remove").html("&times;");
+                        $btn.on("click", function() {
+                            var current = getCodes().filter(function(c){ return c !== code; });
+                            saveAndRender(current);
+                        });
+                        $tag.append($btn);
+                        $input.before($tag);
+                    });
+                }
+
+                $input.on("keydown", function(e) {
+                    if (e.key === "Enter" || e.key === "," || e.key === "Tab") {
+                        e.preventDefault();
+                        var val = $(this).val().trim().toUpperCase().replace(/[^A-Z0-9_\-]/g, "");
+                        if (!val) return;
+                        var codes = getCodes();
+                        if (!codes.includes(val)) {
+                            codes.push(val);
+                            saveAndRender(codes);
+                        }
+                        $(this).val("");
+                    }
+                    if (e.key === "Backspace" && !$(this).val()) {
+                        var codes = getCodes();
+                        if (codes.length) {
+                            codes.pop();
+                            saveAndRender(codes);
+                        }
+                    }
+                });
+
+                $field.on("click", function() { $input.focus(); });
+                saveAndRender(getCodes());
+            }
+
+            dvmInitTagField("special-tag-field",  "special-coupon-input", "special-coupons-value", "red");
+            dvmInitTagField("always-tag-field",   "always-coupon-input",  "always-coupons-value",  "green");
+
+            // ── Radio cards: estilos al seleccionar ────────────────────────
+            $(".dvm-radio-card input[type=radio]").on("change", function() {
+                $(".dvm-radio-card").removeClass("dvm-radio-card--active");
+                $(this).closest(".dvm-radio-card").addClass("dvm-radio-card--active");
+
+                var val = $(this).val();
+                if (val === "no_combine") {
+                    $("#always-combine-group").slideDown(220);
+                } else {
+                    $("#always-combine-group").slideUp(180);
+                }
+            });
         });
     ');
 }
@@ -1014,9 +1461,13 @@ function dvm_hpos_ajax_get_progress_data() {
         $progress_percentage = $range > 0 ? round(($current_units - $prev_level) / $range * 100, 1) : 0;
     }
 
-    $unit_label = dvm_hpos_unit_label();
+    $unit_label    = dvm_hpos_unit_label();
+    $coupon_active = dvm_hpos_check_coupon_blocks_discount($cart);
+    $branding      = dvm_hpos_get_branding();
 
-    if ($is_max_level) {
+    if ($coupon_active) {
+        $motivational_message = $branding['coupon_active_message'];
+    } elseif ($is_max_level) {
         $motivational_message = __('¡Felicitaciones! Alcanzaste el máximo descuento disponible.', 'descuentos-volumen-medias');
     } elseif ($units_needed <= 5) {
         $motivational_message = sprintf(
@@ -1037,14 +1488,15 @@ function dvm_hpos_ajax_get_progress_data() {
 
     wp_send_json_success([
         'current_units'        => $current_units,
-        'units_needed'         => max(0, $units_needed),
+        'units_needed'         => max(0, $units_needed ?? 0),
         'next_discount'        => $next_discount,
         'next_level'           => $next_level,
-        'progress_percentage'  => max(0, min(100, $progress_percentage)),
+        'progress_percentage'  => max(0, min(100, $progress_percentage ?? 100)),
         'is_max_level'         => $is_max_level,
         'current_discount'     => $current_discount,
         'levels'               => $levels,
         'motivational_message' => $motivational_message,
+        'coupon_active'        => $coupon_active,
     ]);
 }
 
