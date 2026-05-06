@@ -106,12 +106,8 @@ function dvm_hpos_aplicar_descuento_por_volumen($cart) {
         $subtotal = $cart->get_subtotal();
         $descuento = $subtotal * ($porcentaje / 100);
         
-        $cart->add_fee(
-            sprintf(esc_html__('Descuento por Docena (%s%%)', 'descuentos-volumen-medias'), $porcentaje),
-            -1 * abs($descuento),
-            false,
-            ''
-        );
+        $fee_label = sprintf('%s (%s%%)', dvm_hpos_get_branding()['discount_name'], $porcentaje);
+        $cart->add_fee($fee_label, -1 * abs($descuento), false, '');
     }
 }
 
@@ -263,6 +259,79 @@ function dvm_hpos_delete_discount_level($quantity) {
 }
 
 /**
+ * Funciones de personalización (branding / marca blanca)
+ */
+function dvm_hpos_get_branding_defaults() {
+    return [
+        'unit_label'      => 'unidades',
+        'discount_name'   => 'Descuento por Volumen',
+        'shortcode_title' => 'Niveles de Descuento',
+        'shortcode_desc'  => 'Compra más y ahorra más.',
+        'color_primary'   => '#2c3e50',
+        'color_secondary' => '#3498db',
+        'color_success'   => '#27ae60',
+        'color_warning'   => '#f39c12',
+        'color_accent'    => '#e74c3c',
+        'dark_primary'    => '#ecf0f1',
+        'dark_secondary'  => '#5dade2',
+        'dark_success'    => '#2ecc71',
+        'dark_warning'    => '#f39c12',
+        'dark_accent'     => '#e74c3c',
+    ];
+}
+
+function dvm_hpos_get_branding() {
+    return wp_parse_args(get_option('dvm_hpos_branding', []), dvm_hpos_get_branding_defaults());
+}
+
+function dvm_hpos_unit_label() {
+    $b = dvm_hpos_get_branding();
+    return sanitize_text_field($b['unit_label']);
+}
+
+function dvm_hpos_save_branding($data) {
+    $defaults     = dvm_hpos_get_branding_defaults();
+    $clean        = [];
+    $text_fields  = ['unit_label', 'discount_name', 'shortcode_title', 'shortcode_desc'];
+    $color_fields = ['color_primary', 'color_secondary', 'color_success', 'color_warning', 'color_accent',
+                     'dark_primary', 'dark_secondary', 'dark_success', 'dark_warning', 'dark_accent'];
+
+    foreach ($text_fields as $field) {
+        $value        = isset($data[$field]) ? sanitize_text_field($data[$field]) : '';
+        $clean[$field] = $value !== '' ? $value : $defaults[$field];
+    }
+
+    foreach ($color_fields as $field) {
+        $value        = isset($data[$field]) ? sanitize_hex_color($data[$field]) : '';
+        $clean[$field] = $value ?: $defaults[$field];
+    }
+
+    return update_option('dvm_hpos_branding', $clean);
+}
+
+function dvm_hpos_get_custom_css_vars() {
+    $b = dvm_hpos_get_branding();
+    return "
+        :root {
+            --joga-primary:   {$b['color_primary']};
+            --joga-secondary: {$b['color_secondary']};
+            --joga-success:   {$b['color_success']};
+            --joga-warning:   {$b['color_warning']};
+            --joga-accent:    {$b['color_accent']};
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --joga-primary:   {$b['dark_primary']};
+                --joga-secondary: {$b['dark_secondary']};
+                --joga-success:   {$b['dark_success']};
+                --joga-warning:   {$b['dark_warning']};
+                --joga-accent:    {$b['dark_accent']};
+            }
+        }
+    ";
+}
+
+/**
  * Configuración en el admin
  */
 add_action('admin_init', 'dvm_hpos_register_settings');
@@ -294,16 +363,16 @@ function dvm_hpos_add_admin_menu() {
  * Página de administración
  */
 function dvm_hpos_admin_page() {
-    // Procesar formularios
     if (isset($_POST['dvm_action'])) {
         dvm_hpos_process_admin_actions();
     }
-    
-    $levels = dvm_hpos_get_discount_levels();
+
+    $levels    = dvm_hpos_get_discount_levels();
     $is_active = get_option('dvm_hpos_active', true);
+    $branding  = dvm_hpos_get_branding();
     ?>
     <div class="wrap">
-        <h1><?php echo esc_html__('Gestión de Niveles de Descuento por Docena', 'descuentos-volumen-medias'); ?></h1>
+        <h1><?php printf(esc_html__('Gestión de Niveles — %s', 'descuentos-volumen-medias'), esc_html($branding['discount_name'])); ?></h1>
         
         <?php if (isset($_GET['message'])): ?>
             <div class="notice notice-success is-dismissible">
@@ -374,7 +443,7 @@ function dvm_hpos_admin_page() {
                         <tbody>
                             <?php foreach ($levels as $quantity => $discount): ?>
                                 <tr>
-                                    <td><strong><?php echo esc_html($quantity); ?></strong> unidades</td>
+                                    <td><strong><?php echo esc_html($quantity); ?></strong> <?php echo esc_html($branding['unit_label']); ?></td>
                                     <td><?php echo esc_html(number_format($discount, 1)); ?>%</td>
                                     <td>
                                         <form method="post" style="display: inline;">
@@ -442,21 +511,137 @@ function dvm_hpos_admin_page() {
                 </div>
             </div>
         </div>
+
+        <hr style="margin: 40px 0;">
+
+        <!-- Sección de personalización -->
+        <div class="dvm-branding-section" style="max-width: 900px;">
+            <h2><?php esc_html_e('Personalización', 'descuentos-volumen-medias'); ?></h2>
+
+            <form method="post">
+                <?php wp_nonce_field('dvm_admin_action', 'dvm_nonce'); ?>
+                <input type="hidden" name="dvm_action" value="save_branding">
+
+                <!-- Textos -->
+                <h3 style="margin-top: 1.5em;"><?php esc_html_e('Textos', 'descuentos-volumen-medias'); ?></h3>
+                <table class="form-table" style="max-width: 700px;">
+                    <tr>
+                        <th scope="row">
+                            <label for="unit_label"><?php esc_html_e('Denominación de unidad', 'descuentos-volumen-medias'); ?></label>
+                        </th>
+                        <td>
+                            <input type="text" id="unit_label" name="unit_label"
+                                   value="<?php echo esc_attr($branding['unit_label']); ?>"
+                                   class="regular-text" placeholder="unidades">
+                            <p class="description"><?php esc_html_e('Ej: unidades, docenas, pares, cajas. Se usa en todos los textos del plugin.', 'descuentos-volumen-medias'); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="discount_name"><?php esc_html_e('Nombre del descuento', 'descuentos-volumen-medias'); ?></label>
+                        </th>
+                        <td>
+                            <input type="text" id="discount_name" name="discount_name"
+                                   value="<?php echo esc_attr($branding['discount_name']); ?>"
+                                   class="regular-text" placeholder="Descuento por Volumen">
+                            <p class="description"><?php esc_html_e('Aparece en el carrito como "Nombre (X%)". Ej: Descuento por Caja, Descuento Mayorista.', 'descuentos-volumen-medias'); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="shortcode_title"><?php esc_html_e('Título del shortcode', 'descuentos-volumen-medias'); ?></label>
+                        </th>
+                        <td>
+                            <input type="text" id="shortcode_title" name="shortcode_title"
+                                   value="<?php echo esc_attr($branding['shortcode_title']); ?>"
+                                   class="regular-text" placeholder="Niveles de Descuento">
+                            <p class="description"><?php esc_html_e('Título que se muestra en el widget [mostrar_descuentos_volumen].', 'descuentos-volumen-medias'); ?></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="shortcode_desc"><?php esc_html_e('Descripción del shortcode', 'descuentos-volumen-medias'); ?></label>
+                        </th>
+                        <td>
+                            <input type="text" id="shortcode_desc" name="shortcode_desc"
+                                   value="<?php echo esc_attr($branding['shortcode_desc']); ?>"
+                                   class="regular-text" placeholder="Compra más y ahorra más.">
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- Colores modo claro -->
+                <h3 style="margin-top: 2em;"><?php esc_html_e('Colores — Modo Claro', 'descuentos-volumen-medias'); ?></h3>
+                <div class="dvm-color-grid">
+                    <?php
+                    $light_colors = [
+                        'color_primary'   => __('Principal', 'descuentos-volumen-medias'),
+                        'color_secondary' => __('Secundario', 'descuentos-volumen-medias'),
+                        'color_success'   => __('Éxito', 'descuentos-volumen-medias'),
+                        'color_warning'   => __('Advertencia', 'descuentos-volumen-medias'),
+                        'color_accent'    => __('Acento', 'descuentos-volumen-medias'),
+                    ];
+                    foreach ($light_colors as $key => $label): ?>
+                        <div class="dvm-color-item">
+                            <label for="<?php echo esc_attr($key); ?>"><?php echo esc_html($label); ?></label>
+                            <input type="text" id="<?php echo esc_attr($key); ?>" name="<?php echo esc_attr($key); ?>"
+                                   value="<?php echo esc_attr($branding[$key]); ?>"
+                                   class="dvm-color-picker" data-default-color="<?php echo esc_attr(dvm_hpos_get_branding_defaults()[$key]); ?>">
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+
+                <!-- Colores modo oscuro -->
+                <h3 style="margin-top: 2em;"><?php esc_html_e('Colores — Modo Oscuro', 'descuentos-volumen-medias'); ?></h3>
+                <div class="dvm-color-grid">
+                    <?php
+                    $dark_colors = [
+                        'dark_primary'   => __('Principal', 'descuentos-volumen-medias'),
+                        'dark_secondary' => __('Secundario', 'descuentos-volumen-medias'),
+                        'dark_success'   => __('Éxito', 'descuentos-volumen-medias'),
+                        'dark_warning'   => __('Advertencia', 'descuentos-volumen-medias'),
+                        'dark_accent'    => __('Acento', 'descuentos-volumen-medias'),
+                    ];
+                    foreach ($dark_colors as $key => $label): ?>
+                        <div class="dvm-color-item">
+                            <label for="<?php echo esc_attr($key); ?>"><?php echo esc_html($label); ?></label>
+                            <input type="text" id="<?php echo esc_attr($key); ?>" name="<?php echo esc_attr($key); ?>"
+                                   value="<?php echo esc_attr($branding[$key]); ?>"
+                                   class="dvm-color-picker" data-default-color="<?php echo esc_attr(dvm_hpos_get_branding_defaults()[$key]); ?>">
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+
+                <p style="margin-top: 2em;">
+                    <?php submit_button(__('Guardar Personalización', 'descuentos-volumen-medias'), 'primary', 'submit_branding', false); ?>
+                </p>
+            </form>
+        </div>
     </div>
-    
+
     <style>
-        .dvm-admin-container {
-            max-width: 1200px;
-        }
-        .dvm-form .form-table th {
-            width: 150px;
-        }
-        .dvm-info ul {
-            list-style-type: disc;
-        }
-        .dvm-levels-list table {
+        .dvm-admin-container { max-width: 1200px; }
+        .dvm-form .form-table th { width: 150px; }
+        .dvm-info ul { list-style-type: disc; }
+        .dvm-levels-list table { margin-top: 10px; }
+        .dvm-color-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
             margin-top: 10px;
         }
+        .dvm-color-item {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-width: 120px;
+        }
+        .dvm-color-item label {
+            font-weight: 600;
+            font-size: 13px;
+            color: #1d2327;
+        }
+        .wp-picker-container { display: block; }
     </style>
     <?php
 }
@@ -525,16 +710,37 @@ function dvm_hpos_process_admin_actions() {
             
         case 'delete':
             $quantity = absint($_POST['quantity']);
-            
+
             if (dvm_hpos_delete_discount_level($quantity)) {
-                $redirect_url = add_query_arg('message', urlencode(__('Nivel de descuento eliminado correctamente.', 'descuentos-volumen-medias')), 
+                $redirect_url = add_query_arg('message', urlencode(__('Nivel de descuento eliminado correctamente.', 'descuentos-volumen-medias')),
                                             remove_query_arg(['message', 'error']));
             } else {
-                $redirect_url = add_query_arg('error', urlencode(__('Error al eliminar el nivel de descuento.', 'descuentos-volumen-medias')), 
+                $redirect_url = add_query_arg('error', urlencode(__('Error al eliminar el nivel de descuento.', 'descuentos-volumen-medias')),
                                             remove_query_arg(['message', 'error']));
             }
-            
+
             wp_redirect($redirect_url);
+            exit;
+
+        case 'save_branding':
+            $fields = ['unit_label', 'discount_name', 'shortcode_title', 'shortcode_desc',
+                       'color_primary', 'color_secondary', 'color_success', 'color_warning', 'color_accent',
+                       'dark_primary', 'dark_secondary', 'dark_success', 'dark_warning', 'dark_accent'];
+
+            $data = [];
+            foreach ($fields as $field) {
+                $data[$field] = isset($_POST[$field]) ? $_POST[$field] : '';
+            }
+
+            if (dvm_hpos_save_branding($data)) {
+                $redirect_url = add_query_arg('message', urlencode(__('Personalización guardada correctamente.', 'descuentos-volumen-medias')),
+                                            remove_query_arg(['message', 'error']));
+            } else {
+                $redirect_url = add_query_arg('error', urlencode(__('Error al guardar la personalización.', 'descuentos-volumen-medias')),
+                                            remove_query_arg(['message', 'error']));
+            }
+
+            wp_redirect($redirect_url . '#dvm-branding-section');
             exit;
     }
 }
@@ -545,64 +751,67 @@ function dvm_hpos_process_admin_actions() {
 add_action('admin_enqueue_scripts', 'dvm_hpos_admin_scripts');
 
 function dvm_hpos_admin_scripts($hook) {
-    // Solo cargar en nuestra página de administración
     if ($hook !== 'woocommerce_page_dvm-discount-levels') {
         return;
     }
-    
+
+    wp_enqueue_style('wp-color-picker');
+    wp_enqueue_script('wp-color-picker');
     wp_enqueue_script('jquery');
-    wp_add_inline_script('jquery', '
+
+    $unit_label     = esc_js(dvm_hpos_unit_label());
+    $existing_levels = wp_json_encode(array_keys(dvm_hpos_get_discount_levels()));
+
+    wp_add_inline_script('wp-color-picker', '
         jQuery(document).ready(function($) {
-            // Confirmación mejorada para eliminar
+
+            // Inicializar color pickers
+            $(".dvm-color-picker").wpColorPicker();
+
+            // Confirmación para eliminar nivel
             $(".dvm-delete-level").on("click", function(e) {
                 e.preventDefault();
-                
                 var quantity = $(this).data("quantity");
                 var discount = $(this).data("discount");
-                
-                if (confirm("¿Estás seguro de eliminar el nivel de " + quantity + " unidades (" + discount + "% descuento)?")) {
+                var label    = "' . $unit_label . '";
+                if (confirm("¿Estás seguro de eliminar el nivel de " + quantity + " " + label + " (" + discount + "% descuento)?")) {
                     $(this).closest("form").submit();
                 }
             });
-            
-            // Validación en tiempo real del formulario
+
+            // Validación en tiempo real del formulario de niveles
             $("#quantity, #discount").on("input", function() {
                 var quantity = parseInt($("#quantity").val());
                 var discount = parseFloat($("#discount").val());
                 var submitBtn = $("#submit");
-                var isValid = true;
+                var isValid  = true;
                 var errorMsg = "";
-                
-                // Limpiar mensajes anteriores
+
                 $(".dvm-validation-error").remove();
-                
+
                 if (quantity <= 0) {
-                    isValid = false;
+                    isValid  = false;
                     errorMsg = "La cantidad debe ser mayor a 0";
                 } else if (discount < 0 || discount > 100) {
-                    isValid = false;
+                    isValid  = false;
                     errorMsg = "El descuento debe estar entre 0 y 100%";
                 }
-                
-                // Verificar si ya existe este nivel
+
                 if (isValid && quantity > 0) {
-                    var existingLevels = ' . json_encode(array_keys(dvm_hpos_get_discount_levels())) . ';
+                    var existingLevels = ' . $existing_levels . ';
                     if (existingLevels.includes(quantity)) {
-                        isValid = false;
-                        errorMsg = "Ya existe un nivel para " + quantity + " docenas. Se actualizará el descuento.";
-                        // En este caso, permitir el envío pero mostrar advertencia
-                        isValid = true;
+                        errorMsg = "Ya existe un nivel para " + quantity + " ' . $unit_label . '. Se actualizará el descuento.";
                         $(this).closest("td").append("<p class=\"dvm-validation-error\" style=\"color: orange; font-size: 12px; margin: 5px 0 0 0;\">" + errorMsg + "</p>");
                     }
                 }
-                
+
                 if (!isValid && errorMsg) {
                     $(this).closest("td").append("<p class=\"dvm-validation-error\" style=\"color: red; font-size: 12px; margin: 5px 0 0 0;\">" + errorMsg + "</p>");
                 }
-                
+
                 submitBtn.prop("disabled", !isValid);
             });
-            
+
             // Auto-dismiss notices
             setTimeout(function() {
                 $(".notice.is-dismissible").fadeOut();
@@ -673,7 +882,7 @@ function dvm_hpos_dashboard_widget_content() {
                 break;
             }
             echo '<tr>';
-            echo '<td>' . esc_html($quantity) . ' unidades</td>';
+            echo '<td>' . esc_html($quantity) . ' ' . esc_html(dvm_hpos_unit_label()) . '</td>';
             echo '<td>' . esc_html(number_format($discount, 1)) . '%</td>';
             echo '</tr>';
             $count++;
@@ -728,6 +937,8 @@ function dvm_hpos_frontend_scripts() {
         [],
         $plugin_ver
     );
+
+    wp_add_inline_style('dvm-progress-styles', dvm_hpos_get_custom_css_vars());
 
     wp_enqueue_script(
         'dvm-progress-script',
@@ -803,17 +1014,23 @@ function dvm_hpos_ajax_get_progress_data() {
         $progress_percentage = $range > 0 ? round(($current_units - $prev_level) / $range * 100, 1) : 0;
     }
 
+    $unit_label = dvm_hpos_unit_label();
+
     if ($is_max_level) {
         $motivational_message = __('¡Felicitaciones! Alcanzaste el máximo descuento disponible.', 'descuentos-volumen-medias');
     } elseif ($units_needed <= 5) {
         $motivational_message = sprintf(
-            __('¡Casi! Solo %d unidad(es) más para el siguiente descuento.', 'descuentos-volumen-medias'),
-            $units_needed
+            /* translators: %1$d = units needed, %2$s = unit label (e.g. unidades, cajas) */
+            __('¡Casi! Solo %1$d %2$s más para el siguiente descuento.', 'descuentos-volumen-medias'),
+            $units_needed,
+            $unit_label
         );
     } else {
         $motivational_message = sprintf(
-            __('Agrega %d unidades más para obtener %s%% de descuento.', 'descuentos-volumen-medias'),
+            /* translators: %1$d = units needed, %2$s = unit label, %3$s = discount percentage */
+            __('Agrega %1$d %2$s más para obtener %3$s%% de descuento.', 'descuentos-volumen-medias'),
             $units_needed,
+            $unit_label,
             number_format($next_discount, 1)
         );
     }
@@ -868,12 +1085,13 @@ function dvm_hpos_deactivation() {
 add_shortcode('mostrar_descuentos_volumen', 'dvm_hpos_mostrar_descuentos_shortcode');
 
 function dvm_hpos_mostrar_descuentos_shortcode($atts) {
-    // Atributos por defecto
+    $branding = dvm_hpos_get_branding();
+
     $atts = shortcode_atts([
-        'titulo' => __('Niveles de Descuento por Docena', 'descuentos-volumen-medias'),
-        'descripcion' => __('Compra más y ahorra más.', 'descuentos-volumen-medias'),
+        'titulo'             => $branding['shortcode_title'],
+        'descripcion'        => $branding['shortcode_desc'],
         'mostrar_descripcion' => 'si',
-        'clase_contenedora' => 'dvm-descuentos-container',
+        'clase_contenedora'  => 'dvm-descuentos-container',
     ], $atts, 'mostrar_descuentos_volumen');
 
     // Obtener niveles de descuento
@@ -904,8 +1122,8 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
                 <div class="dvm-nivel-item" role="listitem">
                     <div class="dvm-nivel-contenido">
                         <div class="dvm-nivel-info">
-                            <span class="dvm-cantidad" aria-label="<?php printf(esc_attr__('Desde %s unidades', 'descuentos-volumen-medias'), esc_attr($cantidad)); ?>">
-                                <?php printf(esc_html__('Desde %s unidades', 'descuentos-volumen-medias'), esc_html($cantidad)); ?>
+                            <span class="dvm-cantidad" aria-label="<?php printf(esc_attr__('Desde %1$s %2$s', 'descuentos-volumen-medias'), esc_attr($cantidad), esc_attr($branding['unit_label'])); ?>">
+                                <?php printf(esc_html__('Desde %1$s %2$s', 'descuentos-volumen-medias'), esc_html($cantidad), esc_html($branding['unit_label'])); ?>
                             </span>
                             <span class="dvm-descuento" aria-label="<?php printf(esc_attr__('Descuento del %s por ciento', 'descuentos-volumen-medias'), number_format($descuento, 1)); ?>">
                                 <?php echo number_format($descuento, 1); ?>%
@@ -927,6 +1145,8 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
     </div>
 
     <style>
+        <?php echo dvm_hpos_get_custom_css_vars(); ?>
+
         .dvm-descuentos-container {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
             max-width: 100%;
@@ -938,7 +1158,7 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
         }
 
         .dvm-titulo {
-            color: #d1e9ff;
+            color: var(--joga-secondary);
             font-size: 1.5rem;
             margin-bottom: 0.5rem;
             text-align: center;
@@ -970,9 +1190,7 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
             box-shadow: 0 4px 12px rgba(0,0,0,0.12);
         }
 
-        .dvm-nivel-contenido {
-            padding: 1.25rem;
-        }
+        .dvm-nivel-contenido { padding: 1.25rem; }
 
         .dvm-nivel-info {
             display: flex;
@@ -985,12 +1203,12 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
 
         .dvm-cantidad {
             font-weight: 600;
-            color: #112236;
+            color: var(--joga-primary);
             font-size: 1.1rem;
         }
 
         .dvm-descuento {
-            background: #007AFF;
+            background: var(--joga-secondary);
             color: white;
             padding: 0.4rem 0.8rem;
             border-radius: 20px;
@@ -1000,9 +1218,7 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
             text-align: center;
         }
 
-        .dvm-nivel-visual {
-            margin-top: 0.5rem;
-        }
+        .dvm-nivel-visual { margin-top: 0.5rem; }
 
         .dvm-barra-progreso {
             height: 12px;
@@ -1013,7 +1229,7 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
 
         .dvm-progreso {
             height: 100%;
-            background: linear-gradient(90deg, #007AFF, #4F9BFF);
+            background: linear-gradient(90deg, var(--joga-secondary), var(--joga-success));
             border-radius: 6px;
             transition: width 0.5s ease;
         }
@@ -1023,6 +1239,13 @@ function dvm_hpos_mostrar_descuentos_shortcode($atts) {
             font-size: 0.85rem;
             color: #7A7A7A;
             margin-top: 1rem;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .dvm-descuentos-container { background-color: #2c2c2c; color: #f0f0f0; }
+            .dvm-nivel-item { background: #3a3a3a; }
+            .dvm-cantidad { color: var(--joga-primary); }
+            .dvm-descripcion, .dvm-leyenda { color: #ccc; }
         }
 
         /* Responsive design */
