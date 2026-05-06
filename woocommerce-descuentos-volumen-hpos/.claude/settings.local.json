@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(php *)",
+      "PowerShell(php -l \"D:\\\\proyectos-git\\\\desarrollo-plugins-personalizados-wordpress\\\\woocommerce-descuentos-volumen-hpos\\\\descuentos-por-volumen.php\")",
+      "PowerShell(Get-Content *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
